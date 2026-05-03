@@ -1,0 +1,3 @@
+sensors: []
+# Octomap updater disabled — MTC handles collision checking via its own planning scene.
+# Re-enable for live point cloud obstacle avoidance outside of MTC demos.

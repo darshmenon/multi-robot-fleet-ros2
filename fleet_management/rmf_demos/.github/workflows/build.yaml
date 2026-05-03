@@ -1,0 +1,21 @@
+name: build
+on:
+  pull_request:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  build_and_test:
+    name: rmf_demos
+    uses: open-rmf/rmf_ci_templates/.github/workflows/reusable_build.yaml@main
+    with:
+      packages: |
+        rmf_demos
+        rmf_demos_assets
+        rmf_demos_bridges
+        rmf_demos_fleet_adapter
+        rmf_demos_gz
+        rmf_demos_maps
+        rmf_demos_tasks
+      dist-matrix: '[{"ros_distribution": "rolling", "ubuntu_distribution": "noble"}]'

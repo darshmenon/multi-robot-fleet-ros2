@@ -1,0 +1,33 @@
+<?xml version='1.0' ?>
+
+<launch>
+  <arg name="map_package" default="rmf_demos_maps" description="Name of the map package" />
+  <arg name="map_name" description="Name of the rmf_demos map to simulate" />
+  <arg name="use_crowdsim" default='0'/>
+  <arg name="sim_update_rate" default='100'/>
+
+  <let name="world_path" value="$(find-pkg-share $(var map_package))/maps/$(var map_name)/$(var map_name).world" />
+  <let name="model_path" value="$(find-pkg-share $(var map_package))/maps/$(var map_name)/models" />
+
+  <!-- Use crowd sim if `use_crowdsim` is true-->
+  <let name="menge_resource_path" if="$(var use_crowdsim)" value="$(find-pkg-share $(var map_package))/maps/$(var map_name)/config_resource"/>
+  <let name="menge_resource_path" unless="$(var use_crowdsim)" value="" />
+
+  <let name="gz_headless" if="$(var headless)" value="-s"/>
+  <let name="gz_headless" unless="$(var headless)" value="" />
+
+  <!-- TODO(luca) Remove the manual concatenation of GZ_SIM_RESOURCE_PATH and just use environment hooks -->
+  <group>
+    <set_env name="GZ_SIM_RESOURCE_PATH" value="$(env GZ_SIM_RESOURCE_PATH):$(var model_path)" />
+    <set_env name="MENGE_RESOURCE_PATH" value="$(var menge_resource_path)"/>
+    <include file="$(find-pkg-share ros_gz_sim)/launch/gz_sim.launch.py">
+      <arg name="gz_args" value="$(var gz_headless) -r -v 3 $(var world_path) -z $(var sim_update_rate)"/>
+    </include>
+  </group>
+
+  <!-- ros_gz bridge for simulation clock -->
+  <node pkg="ros_gz_bridge" exec="parameter_bridge"
+    args="/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock"
+    />
+
+</launch>
