@@ -12,3 +12,7 @@ locations:
   room_c:        [ 0.0,   2.5, 180.0]
   hallway:       [ 1.25,  1.25, 45.0]
   charging_dock: [-1.0,   0.0, 180.0]
+  # Handoff locations — AMR stops here for UR3 arm to pick/place
+  handoff_zone:  [ 1.5,   1.0,   0.0]
+  pickup_shelf:  [ 3.0,   0.0,   0.0]
+  dropoff_bin:   [ 0.0,   3.0, 180.0]
