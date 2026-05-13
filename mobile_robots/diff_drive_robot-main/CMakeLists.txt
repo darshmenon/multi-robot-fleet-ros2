@@ -33,6 +33,7 @@ install(
     scripts/frontier_coordinator.py
     scripts/priority_collision_avoidance.py
     scripts/deadlock_recovery.py
+    scripts/handoff_coordinator.py
   DESTINATION lib/${PROJECT_NAME}
 )
 install(
