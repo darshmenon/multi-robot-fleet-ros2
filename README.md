@@ -27,7 +27,6 @@ multi-robot-fleet-ros2/
 │   └── ur_gazebo/               # Warehouse and pick & place worlds (Gazebo Harmonic/GZ)
 │
 ├── ai_skills/                   # AI-powered robot capabilities
-│   ├── ur_smolvla/              # SmolVLA vision-language-action inference
 │   └── ur_data_collector/       # Data collection for robot learning
 │
 ├── interfaces/                  # Shared ROS 2 message/service interfaces
@@ -71,7 +70,6 @@ multi-robot-fleet-ros2/
 ### AI Skills
 | Package | Description |
 |---|---|
-| `ur_smolvla` | SmolVLA inference node for vision-language-action control |
 | `ur_data_collector` | ROS 2 node for collecting training data from robot demos |
 
 ---
@@ -134,9 +132,46 @@ ros2 launch rmf_demos office.launch.xml
 - [x] UR3 MoveIt 2 integration
 - [x] Open-RMF fleet coordination demos
 - [x] SmolVLA vision-language-action inference
-- [ ] Centralized heterogeneous fleet dispatcher
-- [ ] Sim-to-real transfer for RL pick & place policies
+- [ ] RMF fleet adapter for diff_drive_robot AMRs
 - [ ] RMF fleet adapter for UR3 mobile manipulator
+- [ ] Centralized heterogeneous fleet dispatcher (AMRs + arms)
+- [ ] RMF traffic editor map for the Gazebo warehouse world
+- [ ] Inter-robot handoff — AMR delivers object to UR3 pick zone
+- [ ] Sim-to-real transfer for RL pick & place policies
+- [ ] Object detection node wired to DetectedObject msgs
+- [ ] Multi-robot map merging (SLAM Toolbox multirobot mode)
+- [ ] Docker / devcontainer for reproducible builds
+
+---
+
+## What We Can Build Next
+
+### RMF Integration
+| Feature | Description |
+|---|---|
+| **Custom fleet adapter** | Write a `rmf_fleet_adapter`-compliant node for the `diff_drive_robot` so RMF can dispatch and monitor Nav2 tasks directly. |
+| **Traffic editor map** | Create a `.building.yaml` map in the RMF Traffic Editor matching the Gazebo warehouse, enabling lift/door/charger integration. |
+| **Patrol & delivery tasks** | Configure RMF `patrol` and `delivery` task types dispatched through the RMF web dashboard or API. |
+| **RMF web dashboard** | Launch the Open-RMF web UI (`rmf-web`) to visualize robot states, task queues, and traffic lanes in real time. |
+| **Mobile manipulator adapter** | Extend RMF to treat the `pickplace_rl_mobile` robot as a `robot_type` that can accept pick-and-place task payloads. |
+| **Heterogeneous task dispatch** | Use RMF's task bidding system to route delivery tasks to AMRs and manipulation tasks to UR3 robots based on capability. |
+
+### Multi-Robot Capabilities
+| Feature | Description |
+|---|---|
+| **Map merging** | Use SLAM Toolbox's multirobot mode (already has config) to merge maps from multiple AMRs into a single global costmap. |
+| **Inter-robot handoff** | AMR navigates to a handoff zone → UR3 arm picks the payload → AMR continues delivery. Coordinate via shared ROS 2 topics or RMF tasks. |
+| **Centralized mission server** | Extend the existing `mission_server.py` to accept high-level goals (e.g. "deliver box from A to B") and decompose them into Nav2 + MoveIt subtasks. |
+| **Fleet health dashboard** | Extend `fleet_health.py` and `fleet_gui.py` with battery, pose, and task-status telemetry for all robots in a single Tkinter or web view. |
+| **Dynamic task reallocation** | If a robot fails mid-task, the task allocator re-bids and assigns to another available robot. |
+| **Priority-based traffic management** | Assign lane priority so high-priority robots (e.g. emergency delivery) preempt lower-priority AMRs at intersections. |
+
+### AI / Learning
+| Feature | Description |
+|---|---|
+| **Restore SmolVLA inference** | Rebuild the deleted `ur_smolvla` package with an updated model checkpoint and clean ROS 2 node interface. |
+| **Rosbag training loop** | Automate: record demo → replay → extract episodes → run `train_bc.py` behavior cloning in one launch file. |
+| **Object detection node** | Add a YOLO or DepthAI node publishing `DetectedObjectArray` to complete the perception → grasp pipeline. |
 
 ---
 
