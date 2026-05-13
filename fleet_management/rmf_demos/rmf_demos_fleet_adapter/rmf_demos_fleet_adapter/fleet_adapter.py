@@ -31,7 +31,12 @@ from rclpy.qos import QoSProfile
 from rclpy.qos import QoSReliabilityPolicy as Reliability
 import rmf_adapter
 from rmf_adapter import Adapter
-import rmf_adapter.easy_full_control as rmf_easy
+try:
+    import rmf_adapter.easy_full_control as rmf_easy
+except ImportError:
+    # rmf_adapter 2.1.8 (Humble apt) does not ship easy_full_control.
+    # Use local compatibility shim that wraps the 2.1.8 API.
+    from . import easy_full_control_compat as rmf_easy
 from rmf_fleet_msgs.msg import ClosedLanes
 from rmf_fleet_msgs.msg import LaneRequest
 from rmf_fleet_msgs.msg import ModeRequest
