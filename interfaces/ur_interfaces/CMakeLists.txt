@@ -17,6 +17,7 @@ find_package(std_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/DetectedObject.msg"
   "msg/DetectedObjectArray.msg"
+  "srv/ExecuteCommand.srv"
   "srv/GetPlanningScene.srv"
   DEPENDENCIES geometry_msgs moveit_msgs sensor_msgs std_msgs
 )
