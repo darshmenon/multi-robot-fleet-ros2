@@ -4,19 +4,25 @@ LLM-driven motion planner for UR arm.
 
 Listens on /vla_instruction (String) from the handoff coordinator and on the
 /ur/execute_command service (ur_interfaces/ExecuteCommand).  Converts natural-
-language instructions to a primitive action sequence via the Claude API, then
-executes them through MotionExecutor.
+language instructions to a primitive action sequence via a local Ollama model
+(default) or the Anthropic Claude API, then executes them through MotionExecutor.
 
 Publishes JSON feedback to /vla/task_feedback so the handoff coordinator can
 advance its FSM when the arm pick completes.
 
-Required env var: ANTHROPIC_API_KEY (or pass via 'anthropic_api_key' ROS param).
+Parameters
+----------
+backend          : 'ollama' (default) | 'anthropic'
+model            : model name — defaults to 'llama2' for ollama, ignored if anthropic
+ollama_base_url  : base URL for Ollama REST API (default: http://localhost:11434)
+anthropic_api_key: API key — reads ANTHROPIC_API_KEY env var if blank (anthropic only)
 """
 
 import json
 import os
 import threading
 
+import requests
 import rclpy
 from geometry_msgs.msg import PoseStamped
 from rclpy.node import Node
@@ -47,7 +53,7 @@ Available actions
 
 Rules
 -----
-- Always start with move_to_named_pose home or ready before approaching a target.
+- Always start with move_to_named_pose (home or ready) before approaching a target.
 - Always open_gripper before reaching the pick pose.
 - Return home after placing.
 - Use frame_id "base_link" for all Cartesian poses.
@@ -60,25 +66,31 @@ class LLMPlannerNode(Node):
     def __init__(self):
         super().__init__('llm_planner_node')
 
-        self.declare_parameter('model', 'claude-haiku-4-5-20251001')
+        self.declare_parameter('backend', 'ollama')
+        self.declare_parameter('model', 'llama2')
+        self.declare_parameter('ollama_base_url', 'http://localhost:11434')
         self.declare_parameter('anthropic_api_key', '')
 
-        model = self.get_parameter('model').value
-        api_key = (
-            self.get_parameter('anthropic_api_key').value
-            or os.environ.get('ANTHROPIC_API_KEY', '')
-        )
+        self._backend = self.get_parameter('backend').value
+        self._model = self.get_parameter('model').value
+        self._ollama_url = self.get_parameter('ollama_base_url').value.rstrip('/')
 
-        if _ANTHROPIC_OK:
-            self._claude = _anthropic.Anthropic(api_key=api_key) if api_key else None
+        if self._backend == 'anthropic':
+            api_key = (
+                self.get_parameter('anthropic_api_key').value
+                or os.environ.get('ANTHROPIC_API_KEY', '')
+            )
+            if _ANTHROPIC_OK and api_key:
+                self._claude = _anthropic.Anthropic(api_key=api_key)
+            else:
+                self._claude = None
+                self.get_logger().warn(
+                    'anthropic backend selected but package/key missing — '
+                    'install with: pip install anthropic'
+                )
         else:
             self._claude = None
-            self.get_logger().warn(
-                'anthropic package not installed — LLM planning disabled. '
-                'Install with: pip install anthropic'
-            )
 
-        self._model = model
         self._motion = MotionExecutor(self)
         self._lock = threading.Lock()
         self._busy = False
@@ -86,7 +98,6 @@ class LLMPlannerNode(Node):
         self.create_subscription(String, '/vla_instruction', self._instruction_cb, 10)
         self._feedback_pub = self.create_publisher(String, '/vla/task_feedback', 10)
 
-        # Lazy import: ur_interfaces may not be built yet in some envs
         try:
             from ur_interfaces.srv import ExecuteCommand
             self.create_service(ExecuteCommand, '/ur/execute_command', self._service_cb)
@@ -97,23 +108,19 @@ class LLMPlannerNode(Node):
             )
 
         self.get_logger().info(
-            f'LLM planner ready  model={self._model}  '
-            f'llm={"on" if self._claude else "off"}'
+            f'LLM planner ready  backend={self._backend}  model={self._model}'
+            + (f'  url={self._ollama_url}' if self._backend == 'ollama' else '')
         )
 
-    # ── Incoming instruction (from handoff coordinator) ───────────────────────
+    # ── Incoming instruction ──────────────────────────────────────────────────
 
     def _instruction_cb(self, msg: String):
         if self._busy:
             self.get_logger().warn('Already executing — dropping instruction')
             return
-        threading.Thread(
-            target=self._run,
-            args=(msg.data,),
-            daemon=True,
-        ).start()
+        threading.Thread(target=self._run, args=(msg.data,), daemon=True).start()
 
-    # ── Service (direct / test use) ───────────────────────────────────────────
+    # ── Service ───────────────────────────────────────────────────────────────
 
     def _service_cb(self, request, response):
         ok, msg = self._execute(request.command)
@@ -121,7 +128,7 @@ class LLMPlannerNode(Node):
         response.message = msg
         return response
 
-    # ── Core execution ────────────────────────────────────────────────────────
+    # ── Core ─────────────────────────────────────────────────────────────────
 
     def _run(self, command: str):
         ok, msg = self._execute(command)
@@ -153,26 +160,51 @@ class LLMPlannerNode(Node):
             finally:
                 self._busy = False
 
-    def _plan(self, command: str):
-        if self._claude is None:
-            self.get_logger().error('No Claude client — cannot plan')
-            return None
+    # ── Planning backends ─────────────────────────────────────────────────────
 
+    def _plan(self, command: str):
         try:
-            response = self._claude.messages.create(
-                model=self._model,
-                max_tokens=1024,
-                system=_SYSTEM_PROMPT,
-                messages=[{'role': 'user', 'content': command}],
-            )
-            text = response.content[0].text.strip()
-            # Strip optional markdown fences
-            if text.startswith('```'):
-                text = text.split('\n', 1)[1].rsplit('```', 1)[0].strip()
-            return json.loads(text)
+            if self._backend == 'anthropic':
+                return self._plan_anthropic(command)
+            return self._plan_ollama(command)
         except Exception as exc:
             self.get_logger().error(f'LLM call failed: {exc}')
             return None
+
+    def _plan_ollama(self, command: str):
+        url = f'{self._ollama_url.rstrip("/")}/api/chat'
+        payload = {
+            'model': self._model,
+            'messages': [
+                {'role': 'system', 'content': _SYSTEM_PROMPT},
+                {'role': 'user', 'content': command},
+            ],
+            'stream': False,
+        }
+        resp = requests.post(url, json=payload, timeout=60)
+        resp.raise_for_status()
+        text = resp.json()['message']['content'].strip()
+        return self._parse_plan(text)
+
+    def _plan_anthropic(self, command: str):
+        if self._claude is None:
+            raise RuntimeError('Anthropic client not initialised')
+        response = self._claude.messages.create(
+            model=self._model,
+            max_tokens=1024,
+            system=_SYSTEM_PROMPT,
+            messages=[{'role': 'user', 'content': command}],
+        )
+        text = response.content[0].text.strip()
+        return self._parse_plan(text)
+
+    @staticmethod
+    def _parse_plan(text: str):
+        if text.startswith('```'):
+            text = text.split('\n', 1)[1].rsplit('```', 1)[0].strip()
+        return json.loads(text)
+
+    # ── Step dispatch ─────────────────────────────────────────────────────────
 
     def _run_step(self, step: dict) -> bool:
         action = step.get('action')

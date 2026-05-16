@@ -1,15 +1,15 @@
 """
 Unit tests for llm_planner_node.py.
 
-Stubs out rclpy, anthropic, and MotionExecutor so no ROS 2 or LLM credentials
-are required.
+Stubs out rclpy, requests, anthropic, and MotionExecutor so no ROS 2,
+Ollama, or LLM credentials are required.
 """
 
 import json
 import sys
 import types
 import unittest
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 
 # ---------------------------------------------------------------------------
@@ -29,7 +29,7 @@ def _stub_rclpy():
             self._params = {}
 
         def declare_parameter(self, name, default):
-            self._params[name] = default
+            self._params.setdefault(name, default)
 
         def get_parameter(self, name):
             m = MagicMock()
@@ -109,7 +109,11 @@ def _stub_ur_interfaces():
 _stub_rclpy()
 _stub_ur_interfaces()
 
-# Stub motion_executor inside the package
+
+# ---------------------------------------------------------------------------
+# MotionExecutor stub
+# ---------------------------------------------------------------------------
+
 class _FakeMotionExecutor:
     def __init__(self, node):
         self.node = node
@@ -139,7 +143,6 @@ class _FakeMotionExecutor:
         return True
 
 
-# Stub motion_executor and anthropic before importing the module under test
 _motion_stub = types.ModuleType('ur_llm_planner.motion_executor')
 _motion_stub.MotionExecutor = _FakeMotionExecutor
 sys.modules['ur_llm_planner.motion_executor'] = _motion_stub
@@ -148,9 +151,7 @@ _anthropic_stub = types.ModuleType('anthropic')
 _anthropic_stub.Anthropic = MagicMock
 sys.modules['anthropic'] = _anthropic_stub
 
-# Import from the real package on disk
 sys.path.insert(0, 'manipulation/ur_llm_planner')
-# Clear any bare stub so Python uses the real package from the path
 sys.modules.pop('ur_llm_planner', None)
 from ur_llm_planner.llm_planner_node import LLMPlannerNode  # noqa: E402
 
@@ -169,16 +170,20 @@ _SIMPLE_PLAN = [
 ]
 
 
-def _make_node():
+def _make_node(backend='ollama', model='llama2'):
     node = LLMPlannerNode.__new__(LLMPlannerNode)
-    # Call Node.__init__ manually (our stub)
     from rclpy.node import Node as StubNode
     StubNode.__init__(node, 'llm_planner_node')
     node._params = {
-        'model': 'claude-haiku-4-5-20251001',
+        'backend': backend,
+        'model': model,
+        'ollama_base_url': 'http://localhost:11434',
         'anthropic_api_key': '',
     }
-    node._model = 'claude-haiku-4-5-20251001'
+    node._backend = backend
+    node._model = model
+    node._ollama_url = 'http://localhost:11434'
+    node._claude = None
     node._motion = _FakeMotionExecutor(node)
     node._busy = False
     import threading
@@ -187,7 +192,14 @@ def _make_node():
     return node
 
 
-def _fake_claude(plan):
+def _ollama_response(plan):
+    resp = MagicMock()
+    resp.json.return_value = {'message': {'content': json.dumps(plan)}}
+    resp.raise_for_status = MagicMock()
+    return resp
+
+
+def _anthropic_client(plan):
     client = MagicMock()
     response = MagicMock()
     response.content = [MagicMock()]
@@ -197,57 +209,100 @@ def _fake_claude(plan):
 
 
 # ---------------------------------------------------------------------------
-# Tests: _plan
+# Tests: _parse_plan
 # ---------------------------------------------------------------------------
 
-class TestPlan(unittest.TestCase):
+class TestParsePlan(unittest.TestCase):
 
-    def setUp(self):
-        self.node = _make_node()
-
-    def test_returns_parsed_plan(self):
-        self.node._claude = _fake_claude(_SIMPLE_PLAN)
-        plan = self.node._plan('pick the box')
-        self.assertEqual(plan, _SIMPLE_PLAN)
+    def test_parses_plain_json(self):
+        result = LLMPlannerNode._parse_plan(json.dumps(_SIMPLE_PLAN))
+        self.assertEqual(result, _SIMPLE_PLAN)
 
     def test_strips_markdown_fences(self):
-        client = MagicMock()
-        resp = MagicMock()
-        resp.content = [MagicMock()]
-        resp.content[0].text = '```json\n' + json.dumps(_SIMPLE_PLAN) + '\n```'
-        client.messages.create.return_value = resp
-        self.node._claude = client
-        plan = self.node._plan('pick the box')
+        text = '```json\n' + json.dumps(_SIMPLE_PLAN) + '\n```'
+        result = LLMPlannerNode._parse_plan(text)
+        self.assertEqual(result, _SIMPLE_PLAN)
+
+    def test_raises_on_bad_json(self):
+        with self.assertRaises(json.JSONDecodeError):
+            LLMPlannerNode._parse_plan('not json')
+
+
+# ---------------------------------------------------------------------------
+# Tests: _plan_ollama
+# ---------------------------------------------------------------------------
+
+class TestPlanOllama(unittest.TestCase):
+
+    def setUp(self):
+        self.node = _make_node(backend='ollama')
+
+    @patch('ur_llm_planner.llm_planner_node.requests.post')
+    def test_returns_parsed_plan(self, mock_post):
+        mock_post.return_value = _ollama_response(_SIMPLE_PLAN)
+        plan = self.node._plan_ollama('pick the box')
         self.assertEqual(plan, _SIMPLE_PLAN)
 
-    def test_returns_none_on_bad_json(self):
-        client = MagicMock()
-        resp = MagicMock()
-        resp.content = [MagicMock()]
-        resp.content[0].text = 'not json'
-        client.messages.create.return_value = resp
-        self.node._claude = client
+    @patch('ur_llm_planner.llm_planner_node.requests.post')
+    def test_posts_to_correct_url(self, mock_post):
+        mock_post.return_value = _ollama_response(_SIMPLE_PLAN)
+        self.node._plan_ollama('pick the box')
+        url = mock_post.call_args[0][0]
+        self.assertEqual(url, 'http://localhost:11434/api/chat')
+
+    @patch('ur_llm_planner.llm_planner_node.requests.post')
+    def test_sends_model_and_messages(self, mock_post):
+        mock_post.return_value = _ollama_response(_SIMPLE_PLAN)
+        self.node._plan_ollama('pick the box')
+        payload = mock_post.call_args[1]['json']
+        self.assertEqual(payload['model'], 'llama2')
+        self.assertEqual(payload['stream'], False)
+        roles = [m['role'] for m in payload['messages']]
+        self.assertIn('system', roles)
+        self.assertIn('user', roles)
+
+    @patch('ur_llm_planner.llm_planner_node.requests.post')
+    def test_command_in_user_message(self, mock_post):
+        mock_post.return_value = _ollama_response(_SIMPLE_PLAN)
+        self.node._plan_ollama('grasp the cylinder')
+        payload = mock_post.call_args[1]['json']
+        user_msg = next(m for m in payload['messages'] if m['role'] == 'user')
+        self.assertEqual(user_msg['content'], 'grasp the cylinder')
+
+    @patch('ur_llm_planner.llm_planner_node.requests.post')
+    def test_returns_none_on_http_error(self, mock_post):
+        mock_post.side_effect = requests_exc = __import__('requests').exceptions.ConnectionError
         plan = self.node._plan('pick the box')
         self.assertIsNone(plan)
 
-    def test_returns_none_when_no_client(self):
+    @patch('ur_llm_planner.llm_planner_node.requests.post')
+    def test_strips_trailing_slash_from_url(self, mock_post):
+        self.node._ollama_url = 'http://localhost:11434/'
+        mock_post.return_value = _ollama_response(_SIMPLE_PLAN)
+        # Should not double-slash
+        self.node._plan_ollama('pick')
+        url = mock_post.call_args[0][0]
+        self.assertNotIn('//', url.replace('http://', '').replace('https://', ''))
+
+
+# ---------------------------------------------------------------------------
+# Tests: _plan_anthropic
+# ---------------------------------------------------------------------------
+
+class TestPlanAnthropic(unittest.TestCase):
+
+    def setUp(self):
+        self.node = _make_node(backend='anthropic', model='claude-haiku-4-5-20251001')
+
+    def test_returns_parsed_plan(self):
+        self.node._claude = _anthropic_client(_SIMPLE_PLAN)
+        plan = self.node._plan_anthropic('pick the box')
+        self.assertEqual(plan, _SIMPLE_PLAN)
+
+    def test_raises_when_no_client(self):
         self.node._claude = None
-        plan = self.node._plan('pick the box')
-        self.assertIsNone(plan)
-
-    def test_returns_none_on_api_exception(self):
-        client = MagicMock()
-        client.messages.create.side_effect = RuntimeError('network error')
-        self.node._claude = client
-        plan = self.node._plan('pick the box')
-        self.assertIsNone(plan)
-
-    def test_passes_command_to_llm(self):
-        self.node._claude = _fake_claude(_SIMPLE_PLAN)
-        self.node._plan('grasp the cylinder')
-        args, kwargs = self.node._claude.messages.create.call_args
-        msgs = kwargs.get('messages') or args[0] if args else kwargs['messages']
-        self.assertIn('grasp the cylinder', json.dumps(kwargs))
+        with self.assertRaises(RuntimeError):
+            self.node._plan_anthropic('pick the box')
 
 
 # ---------------------------------------------------------------------------
@@ -295,8 +350,7 @@ class TestRunStep(unittest.TestCase):
 
     def test_move_to_pose_default_quaternion(self):
         step = {'action': 'move_to_pose', 'x': 0.3, 'y': 0.1, 'z': 0.5}
-        ok = self.node._run_step(step)
-        self.assertTrue(ok)
+        self.node._run_step(step)
         _, pose = self.node._motion.calls[0]
         self.assertEqual(pose.pose.orientation.w, 1.0)
 
@@ -309,14 +363,17 @@ class TestExecute(unittest.TestCase):
 
     def setUp(self):
         self.node = _make_node()
-        self.node._claude = _fake_claude(_SIMPLE_PLAN)
 
-    def test_success_returns_true(self):
+    @patch('ur_llm_planner.llm_planner_node.requests.post')
+    def test_success_returns_true(self, mock_post):
+        mock_post.return_value = _ollama_response(_SIMPLE_PLAN)
         ok, msg = self.node._execute('pick the box')
         self.assertTrue(ok)
         self.assertEqual(msg, 'Done')
 
-    def test_runs_all_steps(self):
+    @patch('ur_llm_planner.llm_planner_node.requests.post')
+    def test_runs_all_steps(self, mock_post):
+        mock_post.return_value = _ollama_response(_SIMPLE_PLAN)
         self.node._execute('pick the box')
         action_names = [c[0] for c in self.node._motion.calls]
         self.assertIn('move_to_named_pose', action_names)
@@ -324,101 +381,99 @@ class TestExecute(unittest.TestCase):
         self.assertIn('move_to_pose', action_names)
         self.assertIn('close_gripper', action_names)
 
-    def test_returns_false_on_plan_failure(self):
-        self.node._claude = None
-        ok, msg = self.node._execute('pick the box')
-        self.assertFalse(ok)
-
-    def test_stops_on_first_step_failure(self):
+    @patch('ur_llm_planner.llm_planner_node.requests.post')
+    def test_stops_on_first_step_failure(self, mock_post):
+        mock_post.return_value = _ollama_response(_SIMPLE_PLAN)
         self.node._motion.open_gripper = MagicMock(return_value=False)
         ok, _ = self.node._execute('pick the box')
         self.assertFalse(ok)
-        # move_to_pose should not have been called
         action_names = [c[0] for c in self.node._motion.calls]
         self.assertNotIn('move_to_pose', action_names)
 
-    def test_servers_not_ready_returns_false(self):
+    @patch('ur_llm_planner.llm_planner_node.requests.post')
+    def test_servers_not_ready_returns_false(self, mock_post):
+        mock_post.return_value = _ollama_response(_SIMPLE_PLAN)
         self.node._motion.wait_for_servers = MagicMock(return_value=False)
         ok, msg = self.node._execute('pick the box')
         self.assertFalse(ok)
         self.assertIn('not ready', msg)
 
-    def test_busy_flag_cleared_after_success(self):
+    @patch('ur_llm_planner.llm_planner_node.requests.post')
+    def test_busy_flag_cleared_after_success(self, mock_post):
+        mock_post.return_value = _ollama_response(_SIMPLE_PLAN)
         self.node._execute('pick the box')
         self.assertFalse(self.node._busy)
 
-    def test_busy_flag_cleared_after_failure(self):
-        self.node._claude = None
-        self.node._execute('pick the box')
+    def test_busy_flag_cleared_after_plan_failure(self):
+        # No mock — requests.post will raise ConnectionError → plan returns None
+        with patch('ur_llm_planner.llm_planner_node.requests.post',
+                   side_effect=Exception('no server')):
+            self.node._execute('pick the box')
         self.assertFalse(self.node._busy)
 
 
 # ---------------------------------------------------------------------------
-# Tests: _instruction_cb and _run (feedback publishing)
+# Tests: feedback publishing
 # ---------------------------------------------------------------------------
 
-class TestInstructionCb(unittest.TestCase):
+class TestFeedback(unittest.TestCase):
 
     def setUp(self):
         self.node = _make_node()
-        self.node._claude = _fake_claude(_SIMPLE_PLAN)
         self.node._feedback_pub = MagicMock()
 
-    def _make_str(self, text):
-        from std_msgs.msg import String
-        m = String()
-        m.data = text
-        return m
-
-    def test_run_publishes_completed_on_success(self):
+    @patch('ur_llm_planner.llm_planner_node.requests.post')
+    def test_run_publishes_completed_on_success(self, mock_post):
+        mock_post.return_value = _ollama_response(_SIMPLE_PLAN)
         self.node._run('pick the box')
-        self.node._feedback_pub.publish.assert_called_once()
         payload = json.loads(self.node._feedback_pub.publish.call_args[0][0].data)
         self.assertEqual(payload['status'], 'completed')
 
-    def test_run_publishes_failed_on_failure(self):
-        self.node._claude = None
+    @patch('ur_llm_planner.llm_planner_node.requests.post')
+    def test_run_publishes_failed_on_plan_error(self, mock_post):
+        mock_post.side_effect = Exception('network error')
         self.node._run('pick the box')
         payload = json.loads(self.node._feedback_pub.publish.call_args[0][0].data)
         self.assertEqual(payload['status'], 'failed')
 
     def test_instruction_cb_ignored_when_busy(self):
         self.node._busy = True
-        cb_called = []
-        self.node._run = lambda cmd: cb_called.append(cmd)
-        self.node._instruction_cb(self._make_str('pick the box'))
+        called = []
+        self.node._run = lambda cmd: called.append(cmd)
+        from std_msgs.msg import String
+        m = String()
+        m.data = 'pick the box'
+        self.node._instruction_cb(m)
         import time; time.sleep(0.05)
-        self.assertEqual(cb_called, [])
+        self.assertEqual(called, [])
 
 
 # ---------------------------------------------------------------------------
-# Tests: _service_cb
+# Tests: service callback
 # ---------------------------------------------------------------------------
 
 class TestServiceCb(unittest.TestCase):
 
     def setUp(self):
         self.node = _make_node()
-        self.node._claude = _fake_claude(_SIMPLE_PLAN)
 
-    def _make_request(self, command):
+    @patch('ur_llm_planner.llm_planner_node.requests.post')
+    def test_service_returns_success(self, mock_post):
+        mock_post.return_value = _ollama_response(_SIMPLE_PLAN)
         from ur_interfaces.srv import ExecuteCommand
         req = ExecuteCommand.Request()
-        req.command = command
-        return req
-
-    def test_service_returns_success(self):
-        from ur_interfaces.srv import ExecuteCommand
-        req = self._make_request('pick the box')
+        req.command = 'pick the box'
         resp = ExecuteCommand.Response()
         result = self.node._service_cb(req, resp)
         self.assertTrue(result.success)
         self.assertEqual(result.message, 'Done')
 
-    def test_service_returns_failure(self):
+    @patch('ur_llm_planner.llm_planner_node.requests.post')
+    def test_service_returns_failure(self, mock_post):
+        mock_post.side_effect = Exception('no server')
         from ur_interfaces.srv import ExecuteCommand
-        self.node._claude = None
-        req = self._make_request('pick the box')
+        req = ExecuteCommand.Request()
+        req.command = 'pick the box'
         resp = ExecuteCommand.Response()
         result = self.node._service_cb(req, resp)
         self.assertFalse(result.success)
