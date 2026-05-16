@@ -71,6 +71,7 @@ multi-robot-fleet-ros2/
 | Package | Description |
 |---|---|
 | `ur_data_collector` | ROS 2 node for collecting training data from robot demos |
+| `ur_llm_planner` | Natural-language motion planner — converts free-text commands to UR arm action sequences via a local Ollama model (default) or Anthropic Claude. Wired into the handoff coordinator FSM via `/vla_instruction` / `/vla/task_feedback`. |
 
 ---
 
@@ -125,18 +126,47 @@ ros2 launch moveit_config ur3_moveit.launch.py
 ros2 launch rmf_demos office.launch.xml
 ```
 
+### Launch LLM Planner (Ollama)
+Install and start Ollama, then pull a model:
+```bash
+ollama pull llama2   # or mistral, llama3.2, etc.
+```
+
+Launch the planner node (defaults to `llama2` on `http://localhost:11434`):
+```bash
+ros2 launch ur_llm_planner llm_planner.launch.py
+
+# Different model
+ros2 launch ur_llm_planner llm_planner.launch.py model:=mistral
+
+# Anthropic Claude fallback
+ros2 launch ur_llm_planner llm_planner.launch.py backend:=anthropic model:=claude-haiku-4-5-20251001
+```
+
+Send a natural language command directly:
+```bash
+ros2 service call /ur/execute_command ur_interfaces/srv/ExecuteCommand \
+  '{command: "pick the red box from the AMR and place it on the shelf"}'
+```
+
+Or trigger via the handoff coordinator (the planner subscribes to `/vla_instruction` automatically):
+```bash
+ros2 topic pub --once /vla_instruction std_msgs/msg/String \
+  '{data: "pick the box_A from the AMR and place it on the shelf"}'
+```
+
 ---
 
 ## Roadmap
 - [x] Multi-robot Nav2 navigation with SLAM
 - [x] UR3 MoveIt 2 integration
 - [x] Open-RMF fleet coordination demos
-- [x] SmolVLA vision-language-action inference
+- [x] LLM motion planner (Ollama + Anthropic backends)
 - [ ] RMF fleet adapter for diff_drive_robot AMRs
 - [ ] RMF fleet adapter for UR3 mobile manipulator
 - [ ] Centralized heterogeneous fleet dispatcher (AMRs + arms)
 - [ ] RMF traffic editor map for the Gazebo warehouse world
-- [ ] Inter-robot handoff — AMR delivers object to UR3 pick zone
+- [x] Inter-robot handoff — AMR delivers object to UR3 pick zone
 - [ ] Sim-to-real transfer for RL pick & place policies
 - [ ] Object detection node wired to DetectedObject msgs
 - [ ] Multi-robot map merging (SLAM Toolbox multirobot mode)
@@ -169,9 +199,10 @@ ros2 launch rmf_demos office.launch.xml
 ### AI / Learning
 | Feature | Description |
 |---|---|
-| **Restore SmolVLA inference** | Rebuild the deleted `ur_smolvla` package with an updated model checkpoint and clean ROS 2 node interface. |
+| **Swap Ollama model** | Try `mistral` or `llama3.2` by launching with `model:=mistral` — no code changes needed. |
+| **Object detection node** | Add a YOLO or DepthAI node publishing `DetectedObjectArray`; feed detected poses directly into the LLM planner prompt. |
 | **Rosbag training loop** | Automate: record demo → replay → extract episodes → run `train_bc.py` behavior cloning in one launch file. |
-| **Object detection node** | Add a YOLO or DepthAI node publishing `DetectedObjectArray` to complete the perception → grasp pipeline. |
+| **Restore SmolVLA inference** | Rebuild the deleted `ur_smolvla` package with an updated model checkpoint wired as a second LLM planner backend. |
 
 ---
 
