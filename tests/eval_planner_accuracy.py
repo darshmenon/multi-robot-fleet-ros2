@@ -250,7 +250,7 @@ CHECKERS = {
 # Ollama call
 # ---------------------------------------------------------------------------
 
-def call_ollama(command, model, base_url, timeout=60):
+def call_ollama(command, model, base_url, timeout=120):
     url = f'{base_url.rstrip("/")}/api/chat'
     payload = {
         'model': model,
@@ -266,8 +266,14 @@ def call_ollama(command, model, base_url, timeout=60):
 
 
 def parse_plan(text):
-    if text.startswith('```'):
-        text = text.split('\n', 1)[1].rsplit('```', 1)[0].strip()
+    if '```' in text:
+        text = text.split('```', 1)[1]
+        if text.startswith('json'):
+            text = text[4:]
+        text = text.rsplit('```', 1)[0].strip()
+    start = text.find('[')
+    if start != -1:
+        text = text[start:]
     return json.loads(text)
 
 
@@ -275,7 +281,7 @@ def parse_plan(text):
 # Evaluator
 # ---------------------------------------------------------------------------
 
-def evaluate(model, base_url, verbose):
+def evaluate(model, base_url, verbose, timeout=120, only_cases=None):
     GREEN  = '\033[32m'
     RED    = '\033[31m'
     YELLOW = '\033[33m'
@@ -285,13 +291,17 @@ def evaluate(model, base_url, verbose):
     total_checks = passed_checks = 0
     case_results = []
 
+    cases = TEST_CASES
+    if only_cases:
+        cases = [c for c in TEST_CASES if c['id'] in only_cases]
+
     print(f'\n{BOLD}LLM Planner Accuracy Evaluation{RESET}')
     print(f'Model : {model}')
     print(f'URL   : {base_url}')
-    print(f'Cases : {len(TEST_CASES)}\n')
+    print(f'Cases : {len(cases)}\n')
     print('-' * 70)
 
-    for case in TEST_CASES:
+    for case in cases:
         cid = case['id']
         cmd = case['command']
         checks = case['checks']
@@ -304,7 +314,7 @@ def evaluate(model, base_url, verbose):
 
         try:
             t0 = time.monotonic()
-            raw = call_ollama(cmd, model, base_url)
+            raw = call_ollama(cmd, model, base_url, timeout=timeout)
             latency = time.monotonic() - t0
             plan = parse_plan(raw)
         except json.JSONDecodeError as e:
@@ -353,7 +363,7 @@ def evaluate(model, base_url, verbose):
     pct = 100 * passed_checks // total_checks if total_checks else 0
     cases_passed = sum(1 for _, ok, _, _ in case_results if ok)
     color = GREEN if pct >= 80 else (YELLOW if pct >= 60 else RED)
-    print(f'\n{BOLD}Result: {color}{cases_passed}/{len(TEST_CASES)} cases  '
+    print(f'\n{BOLD}Result: {color}{cases_passed}/{len(cases)} cases  '
           f'{passed_checks}/{total_checks} checks  {pct}%{RESET}\n')
 
     return pct >= 60  # exit 0 if ≥60% checks pass
@@ -367,8 +377,11 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Evaluate LLM planner accuracy via Ollama')
     parser.add_argument('--model',   default='llama2',                 help='Ollama model name')
     parser.add_argument('--url',     default='http://localhost:11434',  help='Ollama base URL')
+    parser.add_argument('--timeout', type=int, default=120,            help='Per-request timeout in seconds')
+    parser.add_argument('--cases',   nargs='+',                        help='Run only these case IDs')
     parser.add_argument('--verbose', action='store_true',              help='Show plan output for every case')
     args = parser.parse_args()
 
-    ok = evaluate(model=args.model, base_url=args.url, verbose=args.verbose)
+    ok = evaluate(model=args.model, base_url=args.url, verbose=args.verbose,
+                  timeout=args.timeout, only_cases=args.cases)
     sys.exit(0 if ok else 1)

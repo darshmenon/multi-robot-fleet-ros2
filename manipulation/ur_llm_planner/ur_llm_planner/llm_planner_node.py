@@ -200,8 +200,16 @@ class LLMPlannerNode(Node):
 
     @staticmethod
     def _parse_plan(text: str):
-        if text.startswith('```'):
-            text = text.split('\n', 1)[1].rsplit('```', 1)[0].strip()
+        # Strip optional markdown fences
+        if '```' in text:
+            text = text.split('```', 1)[1]
+            if text.startswith('json'):
+                text = text[4:]
+            text = text.rsplit('```', 1)[0].strip()
+        # Find the JSON array even when model adds preamble prose
+        start = text.find('[')
+        if start != -1:
+            text = text[start:]
         return json.loads(text)
 
     # ── Step dispatch ─────────────────────────────────────────────────────────

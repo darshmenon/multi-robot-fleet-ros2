@@ -223,6 +223,16 @@ class TestParsePlan(unittest.TestCase):
         result = LLMPlannerNode._parse_plan(text)
         self.assertEqual(result, _SIMPLE_PLAN)
 
+    def test_strips_prose_preamble(self):
+        text = 'Here is a JSON array of actions:\n```\n' + json.dumps(_SIMPLE_PLAN) + '\n```'
+        result = LLMPlannerNode._parse_plan(text)
+        self.assertEqual(result, _SIMPLE_PLAN)
+
+    def test_strips_inline_prose(self):
+        text = 'Here are the actions: ' + json.dumps(_SIMPLE_PLAN)
+        result = LLMPlannerNode._parse_plan(text)
+        self.assertEqual(result, _SIMPLE_PLAN)
+
     def test_raises_on_bad_json(self):
         with self.assertRaises(json.JSONDecodeError):
             LLMPlannerNode._parse_plan('not json')
