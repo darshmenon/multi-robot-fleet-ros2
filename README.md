@@ -155,6 +155,22 @@ ros2 topic pub --once /vla_instruction std_msgs/msg/String \
   '{data: "pick the box_A from the AMR and place it on the shelf"}'
 ```
 
+### Evaluate planner accuracy
+Run the offline accuracy evaluator against a live Ollama instance (no ROS 2 needed):
+```bash
+python3 tests/eval_planner_accuracy.py
+
+# Different model or URL
+python3 tests/eval_planner_accuracy.py --model mistral
+python3 tests/eval_planner_accuracy.py --url http://192.168.1.10:11434 --model llama3.2
+
+# Show full plan output for every test case
+python3 tests/eval_planner_accuracy.py --verbose
+```
+
+Checks each plan for: valid JSON, known actions only, correct gripper ordering (open before close), starts with a named pose, ends at home, and valid Cartesian field types.
+Exit code 0 if ≥ 60% of checks pass, 1 otherwise — suitable for CI.
+
 ---
 
 ## Roadmap
