@@ -97,6 +97,24 @@ def generate_launch_description():
         description='Gripper to attach to the robot.',
     )
 
+    use_gazebo_gui_arg = DeclareLaunchArgument(
+        'use_gazebo_gui',
+        default_value='true',
+        description='Launch Gazebo with GUI. Set false for headless.',
+    )
+
+    use_rviz_arg = DeclareLaunchArgument(
+        'use_rviz',
+        default_value='true',
+        description='Launch RViz2.',
+    )
+
+    use_move_group_arg = DeclareLaunchArgument(
+        'use_move_group',
+        default_value='true',
+        description='Launch MoveIt move_group node.',
+    )
+
     # ------------------------------------------------------------------
     # Include ur.gazebo.launch.py (core simulation + MoveIt)
     # The 'world' argument maps to 'world_file' in ur.gazebo.launch.py
@@ -106,11 +124,14 @@ def generate_launch_description():
             os.path.join(pkg_ur_gazebo, 'launch', 'ur.gazebo.launch.py')
         ),
         launch_arguments={
-            'world_file': LaunchConfiguration('world'),
-            'robot_name': LaunchConfiguration('robot_name'),
-            'use_sim_time': LaunchConfiguration('use_sim_time'),
-            'ur_type': LaunchConfiguration('ur_type'),
-            'gripper': LaunchConfiguration('gripper'),
+            'world_file':      LaunchConfiguration('world'),
+            'robot_name':      LaunchConfiguration('robot_name'),
+            'use_sim_time':    LaunchConfiguration('use_sim_time'),
+            'ur_type':         LaunchConfiguration('ur_type'),
+            'gripper':         LaunchConfiguration('gripper'),
+            'use_gazebo_gui':  LaunchConfiguration('use_gazebo_gui'),
+            'use_rviz':        LaunchConfiguration('use_rviz'),
+            'use_move_group':  LaunchConfiguration('use_move_group'),
         }.items(),
     )
 
@@ -195,6 +216,9 @@ def generate_launch_description():
         use_sim_time_arg,
         ur_type_arg,
         gripper_arg,
+        use_gazebo_gui_arg,
+        use_rviz_arg,
+        use_move_group_arg,
         gazebo_launch,
     ])
 
