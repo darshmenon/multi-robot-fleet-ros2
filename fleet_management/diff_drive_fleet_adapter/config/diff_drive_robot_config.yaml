@@ -1,0 +1,66 @@
+# FLEET CONFIG =================================================================
+# RMF Fleet parameters for diff_drive_robot.
+#
+# limits/profile below come from diff_drive_robot's actual Nav2 params
+# (mobile_robots/diff_drive_robot-main/config/nav2_multirobot_params_1.yaml:
+# max_vel_x/max_vel_theta/acc_lim_x/acc_lim_theta, robot_radius), not copied
+# from the tinyRobot demo.
+#
+# There is no `fleet_manager:` block here (unlike rmf_demos' tinyRobot
+# config) — diff_drive_fleet_adapter talks to Nav2/tf directly, there is no
+# REST fleet manager to bridge to.
+
+rmf_fleet:
+  name: "diff_drive_robot"
+  map_name: "L1" # must match the level name in nav_graphs/0.yaml
+  robot_state_update_frequency: 10.0
+  limits:
+    linear: [0.26, 2.5]  # velocity, acceleration -- nav2_multirobot_params_1.yaml
+    angular: [1.0, 3.2]  # velocity, acceleration -- nav2_multirobot_params_1.yaml
+  profile: # Robot profile is modelled as a circle
+    footprint: 0.22 # radius in m -- robot_radius in nav2_multirobot_params_1.yaml
+    vicinity: 0.4 # radius in m
+  reversible: True # whether robots in this fleet can reverse
+  battery_system:
+    # diff_drive_robot has no battery sensor/topic; these values are unused
+    # placeholders required by the FleetConfiguration schema. battery_soc is
+    # stubbed at 1.0 in RobotClientAPI.get_data() until real instrumentation
+    # exists (account_for_battery_drain is disabled below to reflect this).
+    voltage: 12.0 # V
+    capacity: 24.0 # Ahr
+    charging_current: 5.0 # A
+  mechanical_system:
+    mass: 20.0 # kg
+    moment_of_inertia: 10.0 #kgm^2
+    friction_coefficient: 0.22
+  ambient_system:
+    power: 20.0 # W
+  tool_system:
+    power: 0.0 # W
+  recharge_threshold: 0.10
+  recharge_soc: 1.0
+  publish_fleet_state: 10.0
+  account_for_battery_drain: False # no real battery telemetry -- see note above
+  task_capabilities:
+    loop: True
+    delivery: True
+  actions: []  # diff_drive_robot has no teleop/clean/attach activities yet
+  finishing_request: "park" # [park, charge, nothing] -- "charge" is unrealistic without real battery data
+  responsive_wait: False
+  use_parking_reservations: False # rmf_reservation_node is not built in this workspace
+  reassign_task_interval: 120
+  task_assignment_strategy:
+    profile: "DefaultFastest"
+    weights:
+      finish_time: [1.0]
+    options:
+      busy_mode: "Binary"
+  robots:
+    # NOTE: both robots share the single "charging_dock" waypoint defined in
+    # nav_graphs/0.yaml, seeded from diff_drive_robot's config/locations.yaml
+    # (which only has one charging_dock). A real 2-robot deployment should
+    # add a second charger waypoint and split these.
+    robot1:
+      charger: "charging_dock"
+    robot2:
+      charger: "charging_dock"

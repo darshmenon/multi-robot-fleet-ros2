@@ -61,6 +61,7 @@ multi-robot-fleet-ros2/
 | Package | Description |
 |---|---|
 | `rmf_demos` | Open-RMF fleet adapter, task dispatcher, and map demos for heterogeneous fleet coordination. |
+| `diff_drive_fleet_adapter` | Custom Open-RMF fleet adapter for `diff_drive_robot` — talks directly to its namespaced Nav2 `navigate_to_pose` action and tf, no REST layer. Connects to the RMF schedule node; end-to-end task dispatch against real Nav2 navigation is not yet verified (see Roadmap). |
 
 ### Simulation
 | Package | Description |
@@ -125,7 +126,13 @@ ros2 launch moveit_config ur3_moveit.launch.py
 ```bash
 ros2 launch rmf_demos office.launch.xml headless:=true
 ```
-Note: `use_reservation_node` and `use_mutex_group_supervisor` default to `false` since the apt-packaged `rmf_fleet_adapter` (2.1.8) doesn't ship `rmf_reservation_node` or the `mutex_group_supervisor` executable. This launches only the fleet-coordination stack; to see simulated robots, use `ros2 launch rmf_demos_gz office.launch.xml` (requires Gazebo Classic).
+Note: `use_reservation_node` and `use_mutex_group_supervisor` default to `false` since the apt-packaged `rmf_fleet_adapter` (2.1.8) doesn't ship `rmf_reservation_node` or the `mutex_group_supervisor` executable. This launches only the fleet-coordination stack; `ros2 launch rmf_demos_gz office.launch.xml` is meant to add simulated robots but currently fails — its `office.world` uses Classic-era `model://` Fuel URIs (including the robot model itself) that Harmonic's `gz sim` can't resolve.
+
+### Launch RMF Fleet Adapter for diff_drive_robot
+```bash
+ros2 launch diff_drive_fleet_adapter fleet_adapter.launch.xml use_sim_time:=false
+```
+Connects directly to `diff_drive_robot`'s namespaced Nav2 `navigate_to_pose` action and tf (no REST fleet manager). Confirmed to register with the RMF schedule node above; dispatching a real RMF task against a live `diff_drive_robot` Nav2 stack has not yet been tested end-to-end. Uses a hand-authored seed nav graph (`diff_drive_fleet_adapter/config/nav_graphs/0.yaml`) based on `diff_drive_robot`'s `config/locations.yaml`, not a Traffic Editor export — see the Roadmap.
 
 ### Launch LLM Planner (Ollama)
 Install and start Ollama, then pull a model:
@@ -179,7 +186,7 @@ Exit code 0 if ≥ 60% of checks pass, 1 otherwise — suitable for CI.
 - [x] UR3 MoveIt 2 integration
 - [x] Open-RMF fleet coordination demos
 - [x] LLM motion planner (Ollama + Anthropic backends)
-- [ ] RMF fleet adapter for diff_drive_robot AMRs
+- [ ] RMF fleet adapter for diff_drive_robot AMRs — adapter built (`diff_drive_fleet_adapter`), registers with the RMF schedule node; still needs a real Traffic Editor nav graph and an end-to-end task-dispatch test against live Nav2
 - [ ] RMF fleet adapter for UR3 mobile manipulator
 - [ ] Centralized heterogeneous fleet dispatcher (AMRs + arms)
 - [ ] RMF traffic editor map for the Gazebo warehouse world
@@ -196,8 +203,8 @@ Exit code 0 if ≥ 60% of checks pass, 1 otherwise — suitable for CI.
 ### RMF Integration
 | Feature | Description |
 |---|---|
-| **Custom fleet adapter** | Write a `rmf_fleet_adapter`-compliant node for the `diff_drive_robot` so RMF can dispatch and monitor Nav2 tasks directly. |
-| **Traffic editor map** | Create a `.building.yaml` map in the RMF Traffic Editor matching the Gazebo warehouse, enabling lift/door/charger integration. |
+| **Verify custom fleet adapter end-to-end** | `diff_drive_fleet_adapter` is built and registers with the RMF schedule node (see Launch section); still needs a live test dispatching an RMF task and confirming `diff_drive_robot` actually navigates via Nav2 in response. |
+| **Traffic editor map** | Replace `diff_drive_fleet_adapter/config/nav_graphs/0.yaml` (a hand-authored seed graph) with a real `.building.yaml`/nav graph made in the RMF Traffic Editor matching `diff_drive_robot`'s actual map, enabling lift/door/charger integration. |
 | **Patrol & delivery tasks** | Configure RMF `patrol` and `delivery` task types dispatched through the RMF web dashboard or API. |
 | **RMF web dashboard** | Launch the Open-RMF web UI (`rmf-web`) to visualize robot states, task queues, and traffic lanes in real time. |
 | **Mobile manipulator adapter** | Extend RMF to treat the `pickplace_rl_mobile` robot as a `robot_type` that can accept pick-and-place task payloads. |

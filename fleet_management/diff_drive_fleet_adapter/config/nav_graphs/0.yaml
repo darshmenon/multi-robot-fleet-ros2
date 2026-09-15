@@ -1,0 +1,89 @@
+# RMF nav graph for diff_drive_robot, seeded from diff_drive_robot-main's
+# config/locations.yaml waypoint positions (name: [x, y, yaw_deg] there;
+# yaw is dropped here since RMF graph vertices don't carry orientation).
+# Lanes route everything through a central "hallway" hub, matching the
+# rough spatial layout of the named locations.
+#
+# This is a hand-authored seed graph, not exported from RMF Traffic Editor —
+# it should be replaced with a Traffic Editor map once one exists for
+# diff_drive_robot's actual world.
+building_name: diff_drive_robot
+levels:
+  L1:
+    lanes:
+    - - 4
+      - 0
+      - {speed_limit: 0}
+    - - 0
+      - 4
+      - {speed_limit: 0}
+    - - 4
+      - 1
+      - {speed_limit: 0}
+    - - 1
+      - 4
+      - {speed_limit: 0}
+    - - 4
+      - 2
+      - {speed_limit: 0}
+    - - 2
+      - 4
+      - {speed_limit: 0}
+    - - 4
+      - 3
+      - {speed_limit: 0}
+    - - 3
+      - 4
+      - {speed_limit: 0}
+    - - 4
+      - 6
+      - {speed_limit: 0}
+    - - 6
+      - 4
+      - {speed_limit: 0}
+    - - 1
+      - 7
+      - {speed_limit: 0}
+    - - 7
+      - 1
+      - {speed_limit: 0}
+    - - 3
+      - 8
+      - {speed_limit: 0}
+    - - 8
+      - 3
+      - {speed_limit: 0}
+    - - 0
+      - 5
+      - {speed_limit: 0}
+    - - 5
+      - 0
+      - {speed_limit: 0}
+    vertices:
+    - - 0.0
+      - 0.0
+      - {name: origin}
+    - - 2.5
+      - 0.0
+      - {name: room_a}
+    - - 2.5
+      - 2.5
+      - {name: room_b}
+    - - 0.0
+      - 2.5
+      - {name: room_c}
+    - - 1.25
+      - 1.25
+      - {name: hallway}
+    - - -1.0
+      - 0.0
+      - {is_charger: true, is_holding_point: true, is_parking_spot: true, name: charging_dock}
+    - - 1.5
+      - 1.0
+      - {name: handoff_zone}
+    - - 3.0
+      - 0.0
+      - {name: pickup_shelf}
+    - - 0.0
+      - 3.0
+      - {name: dropoff_bin}
