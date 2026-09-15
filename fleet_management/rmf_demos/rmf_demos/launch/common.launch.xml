@@ -11,6 +11,7 @@
   <arg name="use_unique_hex_string_with_task_id" default="true" description="Appends a unique hex string to the task ID"/>
   <arg name="server_uri" default="" description="The URI of the api server to transmit state and task information."/>
   <arg name="use_reservation_node" default="false" description="Enable the reservation node for parking spot de-confliction"/>
+  <arg name="use_mutex_group_supervisor" default="false" description="Enable the mutex group supervisor (requires an rmf_fleet_adapter build newer than the current apt package)"/>
   <arg name="use_site_map" default="false" description="Generate and serve site maps if True. Otherwise supports only building maps."/>
 
   <!-- Traffic Schedule  -->
@@ -78,7 +79,7 @@
   </group>
 
   <!-- Mutex Group Supervisor, manages the locking and unlocking of mutex groups -->
-  <group>
+  <group if="$(var use_mutex_group_supervisor)">
     <node pkg="rmf_fleet_adapter" exec="mutex_group_supervisor"/>
   </group>
 
