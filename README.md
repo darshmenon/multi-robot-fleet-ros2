@@ -123,8 +123,9 @@ ros2 launch moveit_config ur3_moveit.launch.py
 
 ### Launch Fleet Demo (Open-RMF)
 ```bash
-ros2 launch rmf_demos office.launch.xml
+ros2 launch rmf_demos office.launch.xml headless:=true
 ```
+Note: `use_reservation_node` and `use_mutex_group_supervisor` default to `false` since the apt-packaged `rmf_fleet_adapter` (2.1.8) doesn't ship `rmf_reservation_node` or the `mutex_group_supervisor` executable. This launches only the fleet-coordination stack; to see simulated robots, use `ros2 launch rmf_demos_gz office.launch.xml` (requires Gazebo Classic).
 
 ### Launch LLM Planner (Ollama)
 Install and start Ollama, then pull a model:
