@@ -40,6 +40,9 @@ install(
     scripts/scan_quality_gate.py
     scripts/costmap_ghost_clear.py
     scripts/slam_stall_watchdog.py
+    scripts/cbs_planner.py
+    scripts/leader_follower.py
+    scripts/multi_coverage.py
   DESTINATION lib/${PROJECT_NAME}
 )
 install(
