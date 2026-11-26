@@ -3,7 +3,7 @@
 Waypoint follower using Nav2's FollowWaypoints action.
 
 Waypoints are loaded from a YAML file.  The default path is
-<package_share>/config/waypoints.yaml (falls back to ~/rosnav/waypoints.yaml).
+<package_share>/config/waypoints.yaml (falls back to the package source tree).
 Override at runtime:
   ros2 run diff_drive_robot waypoint_nav.py --ros-args \\
       -p waypoints_file:=/path/to/waypoints.yaml
@@ -59,8 +59,7 @@ def _pkg_share() -> str:
         from ament_index_python.packages import get_package_share_directory
         return get_package_share_directory('diff_drive_robot')
     except Exception:
-        return os.path.join(
-            os.path.expanduser('~'), 'rosnav', 'src', 'diff_drive_robot-main')
+        return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _default_waypoints_path() -> str:
@@ -72,7 +71,6 @@ def _load_locations(share: str) -> dict:
         return {}
     candidates = [
         os.path.join(share, 'config', 'locations.yaml'),
-        os.path.join(os.path.expanduser('~'), 'rosnav', 'locations.yaml'),
     ]
     for p in candidates:
         if os.path.isfile(p):

@@ -83,16 +83,14 @@ def _locations_path() -> str:
             get_package_share_directory('diff_drive_robot'), 'config', 'locations.yaml')
     except Exception:
         return os.path.join(
-            os.path.expanduser('~'), 'rosnav', 'src',
-            'diff_drive_robot-main', 'config', 'locations.yaml')
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config', 'locations.yaml')
 
 
 def _load_locations(path: str = '') -> dict:
     if not HAS_YAML:
         return {}
     candidates = [path] if path else []
-    candidates += [_locations_path(),
-                   os.path.join(os.path.expanduser('~'), 'rosnav', 'locations.yaml')]
+    candidates += [_locations_path()]
     for p in candidates:
         if p and os.path.isfile(p):
             with open(p) as f:

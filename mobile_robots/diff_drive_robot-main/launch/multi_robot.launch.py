@@ -110,7 +110,6 @@ def _resolve_map_file(map_arg: str, world_path: str, pkg_share: str) -> str:
     candidates = [
         os.path.join(pkg_share, 'maps', f'map_{world_name}.yaml'),
         os.path.join(pkg_share, 'maps', f'{world_name}_map.yaml'),
-        os.path.join(home, 'rosnav', 'maps', f'map_{world_name}.yaml'),
         os.path.join(pkg_share, 'maps', 'my_map.yaml'),
     ]
     for c in candidates:

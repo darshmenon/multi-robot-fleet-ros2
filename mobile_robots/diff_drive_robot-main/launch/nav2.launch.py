@@ -19,15 +19,10 @@ def _resolve_map_file(map_arg: str, world_path: str, home: str, pkg_share: str) 
         return map_arg
     world_name = os.path.splitext(os.path.basename(world_path))[0].replace('.world', '')
     maps_dir = os.path.join(pkg_share, 'maps')
-    legacy_maps_dir = os.path.join(home, 'rosnav', 'maps')
     candidates = [
         os.path.join(maps_dir, f'{world_name}_map.yaml'),
         os.path.join(maps_dir, f'map_{world_name}.yaml'),
-        os.path.join(legacy_maps_dir, f'{world_name}_map.yaml'),
-        os.path.join(home, 'rosnav', f'{world_name}_map.yaml'),
         os.path.join(maps_dir, 'my_map.yaml'),
-        os.path.join(legacy_maps_dir, 'my_map.yaml'),
-        os.path.join(home, 'rosnav', 'my_map.yaml'),
     ]
     for candidate in candidates:
         if os.path.exists(candidate):

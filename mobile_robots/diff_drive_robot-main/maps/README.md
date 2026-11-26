@@ -6,12 +6,12 @@ Multi-robot launch
 
 Launch Gazebo with the GUI:
   source /opt/ros/humble/setup.bash
-  source ~/rosnav/install/setup.bash
+  source install/setup.bash
   ros2 launch diff_drive_robot multi_robot.launch.py
 
 Launch headless:
   source /opt/ros/humble/setup.bash
-  source ~/rosnav/install/setup.bash
+  source install/setup.bash
   ros2 launch diff_drive_robot multi_robot.launch.py headless:=true rviz:=false
 
 Before relaunching, stop any older stack first to avoid duplicate /clock and TF publishers:
