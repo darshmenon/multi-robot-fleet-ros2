@@ -14,10 +14,20 @@ Checks per robot
   collision     Last known collision monitor state
   overall       OK | WARN | ERROR
 
+Optional ros2_pulse
+───────────────────
+  If ros2_pulse (apt: ros-humble-ros2-pulse) is running (LD_PRELOAD probe, jsonl logs, e.g.
+  `multi_robot.launch.py pulse:=true`), odom_hz / scan_hz come from its logs and this node does
+  not subscribe to every robot's /odom and /scan itself. Without fresh pulse logs, or for a
+  robot pulse has not seen, it keeps the subscriptions below, so nothing needs installing.
+  Pulse rates are 5 s window averages: slower to react than the 2 s subscription window.
+  Parameter use_pulse: auto (default) | false (never read pulse).  Report has a per-robot "source".
+
 Overall rules
 ─────────────
   ERROR   odom or scan dropped to 0 Hz
-  WARN    odom or scan below threshold, OR nav2_alive = false
+  WARN    odom or scan below threshold, OR nav2_alive = false, OR no exploration progress
+          for stall_s (60 s) while frontiers remain (progress = stalled)
   OK      all checks green
 
 Usage
@@ -44,6 +54,16 @@ from rclpy.utilities import remove_ros_args
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
+
+try:                                    # optional: only used when ros2_pulse logs exist
+    from pulse_rates import PulseRates, nav_loop_rates, stall_reason
+except ImportError:                     # pragma: no cover - module missing from an install
+    PulseRates = None
+
+def progress_stalled(have_stats: bool, unchanged_s: float, frontiers: int, stall_s: float) -> bool:
+    """Exploration counts as stalled when stats exist, frontiers remain and nothing changed for stall_s."""
+    return bool(have_stats) and frontiers > 0 and unchanged_s >= stall_s
+
 
 _ODOM_WARN_HZ  = 5.0
 _SCAN_WARN_HZ  = 5.0
@@ -85,7 +105,23 @@ class FleetHealthMonitor(Node):
         self._scan_subs:     dict = {}
         self._col_subs:      dict = {}
 
+        self.declare_parameter('use_pulse', 'auto')        # auto | false
+        self.declare_parameter('pulse_glob', '')           # '' = $TMPDIR/topic_freq.*.log
+        mode = str(self.get_parameter('use_pulse').value).strip().lower()
+        self._pulse = None
+        if mode != 'false' and PulseRates is not None:
+            self._pulse = PulseRates(str(self.get_parameter('pulse_glob').value))
+        self._sources:       dict[str, str] = {}
+        self._stall_warned = False
+
         self.create_subscription(String, '/mission/state',  self._mission_cb,  10)
+        # Exploration progress: odom/scan alive does not mean the fleet is getting anywhere.
+        self.declare_parameter('stall_s', 60.0)
+        self._stall_s = float(self.get_parameter('stall_s').value)
+        self._prog_sig = None
+        self._prog_changed = time.monotonic()
+        self._frontiers = 0
+        self.create_subscription(String, '/exploration/stats', self._stats_cb, 10)
         self._pub = self.create_publisher(String, '/fleet/health', 10)
 
         self.create_timer(1.0, self._tick)
@@ -106,17 +142,21 @@ class FleetHealthMonitor(Node):
             self._odom_rates[ns] = RateTracker()
             self._scan_rates[ns] = RateTracker()
 
-            self._odom_subs[ns] = self.create_subscription(
-                Odometry, f'/{ns}/odom',
-                lambda msg, n=ns: self._odom_cb(n), 10)
-            self._scan_subs[ns] = self.create_subscription(
-                LaserScan, f'/{ns}/scan',
-                lambda msg, n=ns: self._scan_cb(n), 10)
             self._col_subs[ns] = self.create_subscription(
                 String, f'/{ns}/collision_monitor/state',
                 lambda msg, n=ns: self._col_cb(msg, n), 10)
 
             self.get_logger().info(f'Health: tracking {ns}')
+
+    def _ensure_stream_subs(self, ns: str):
+        """Own /odom and /scan subscriptions: the fallback when pulse has no data for this robot."""
+        if ns in self._odom_subs:
+            return
+        self._odom_subs[ns] = self.create_subscription(
+            Odometry, f'/{ns}/odom', lambda msg, n=ns: self._odom_cb(n), 10)
+        self._scan_subs[ns] = self.create_subscription(
+            LaserScan, f'/{ns}/scan', lambda msg, n=ns: self._scan_cb(n), 10)
+        self.get_logger().info(f'Health: {ns} odom/scan from own subscriptions')
 
     def _odom_cb(self, ns: str):
         with self._lock:
@@ -132,6 +172,18 @@ class FleetHealthMonitor(Node):
                 self._collision_states[ns] = json.loads(msg.data)
         except json.JSONDecodeError:
             pass
+
+    def _stats_cb(self, msg: String):
+        try:
+            d = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        sig = (d.get('succeeded_goals'), d.get('visited_count'), d.get('explored_area_m2'))
+        with self._lock:
+            if sig != self._prog_sig:
+                self._prog_sig = sig
+                self._prog_changed = time.monotonic()
+            self._frontiers = int(d.get('frontier_count') or 0)
 
     def _mission_cb(self, msg: String):
         try:
@@ -149,14 +201,35 @@ class FleetHealthMonitor(Node):
         self._discover()
 
         node_ns_pairs = self.get_node_names_and_namespaces()
+        pulse = self._pulse.read() if self._pulse is not None else {}
+
+        # Per robot: pulse when it reports both streams, else our own subscriptions.
+        for ns in sorted(self._known_robots):
+            src = 'pulse' if (f'/{ns}/odom' in pulse and f'/{ns}/scan' in pulse) else 'subscription'
+            if src == 'subscription':
+                self._ensure_stream_subs(ns)
+            if self._sources.get(ns) != src:
+                self._sources[ns] = src
+                self.get_logger().info(f'Health: {ns} rates from {src}')
 
         with self._lock:
             robots = sorted(self._known_robots)
             report = {}
+            stalled_s = time.monotonic() - self._prog_changed
+            stalled = progress_stalled(self._prog_sig is not None, stalled_s, self._frontiers, self._stall_s)
+            if stalled and not self._stall_warned:
+                self.get_logger().warn(
+                    f'Health: no exploration progress for {stalled_s:.0f}s with '
+                    f'{self._frontiers} frontier(s) left - fleet is stalled')
+            self._stall_warned = stalled
 
             for ns in robots:
-                odom_hz = self._odom_rates[ns].hz
-                scan_hz = self._scan_rates[ns].hz
+                if self._sources.get(ns) == 'pulse':
+                    odom_hz = pulse[f'/{ns}/odom']
+                    scan_hz = pulse[f'/{ns}/scan']
+                else:
+                    odom_hz = self._odom_rates[ns].hz
+                    scan_hz = self._scan_rates[ns].hz
                 nav2_ok = any(
                     name == 'bt_navigator' and namespace.rstrip('/') == f'/{ns}'
                     for name, namespace in node_ns_pairs
@@ -171,16 +244,27 @@ class FleetHealthMonitor(Node):
                     overall = 'WARN'
                 elif col_state == 'STOP':
                     overall = 'WARN'
+                elif stalled:
+                    overall = 'WARN'
                 else:
                     overall = 'OK'
 
+                extra = {}
+                if self._sources.get(ns) == 'pulse':
+                    loops = nav_loop_rates(pulse, ns)
+                    extra = {k: (round(v, 1) if v is not None else None) for k, v in loops.items()}
+                    if stalled:
+                        extra['stall_reason'] = stall_reason(odom_hz, scan_hz, loops)
                 report[ns] = {
+                    **extra,
                     'overall':   overall,
                     'odom_hz':   round(odom_hz, 1),
                     'scan_hz':   round(scan_hz, 1),
+                    'source':    self._sources.get(ns, 'subscription'),
                     'nav2':      nav2_ok,
                     'mission':   mission,
                     'collision': col_state,
+                    'progress':  'stalled' if stalled else 'ok',
                 }
 
         msg      = String()
@@ -233,13 +317,17 @@ def main():
         rclpy.init()
         node = FleetHealthMonitor()
         try:
-            rclpy.spin(node)
+            try:
+                rclpy.spin(node)
+            except Exception:  # noqa: BLE001 - a signal can invalidate the context mid-spin
+                if rclpy.ok():
+                    raise
         except KeyboardInterrupt:
             pass
         finally:
             node.destroy_node()
             try:
-                rclpy.shutdown()
+                rclpy.try_shutdown()
             except Exception:
                 pass
         return
@@ -254,7 +342,7 @@ def main():
 
     node.destroy_node()
     try:
-        rclpy.shutdown()
+        rclpy.try_shutdown()
     except Exception:
         pass
 
