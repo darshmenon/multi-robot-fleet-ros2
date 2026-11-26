@@ -75,7 +75,7 @@ class ImprovedAStar(Node):
         if self._map_ready or self._using_fallback:
             return
         self._using_fallback = True
-        self.obstacles = self._world_pts_to_grid(_FALLBACK_OBSTACLES, self._resolution)
+        self.obstacles = _world_pts_to_grid(_FALLBACK_OBSTACLES, self._resolution)
         self.get_logger().warn(
             'No /map received — using hardcoded demo obstacles. '
             'Publish an OccupancyGrid to plan on a real map.')
