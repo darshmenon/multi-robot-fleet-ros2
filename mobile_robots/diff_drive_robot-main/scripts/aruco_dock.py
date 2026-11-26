@@ -884,7 +884,7 @@ def main(args=None):
     finally:
         node.destroy_node()
         if rclpy.ok():
-            rclpy.shutdown()
+            rclpy.try_shutdown()
     sys.exit(exit_code)
 
 

@@ -567,7 +567,7 @@ def main(args=None):
         executor.shutdown()
         node.destroy_node()
         if rclpy.ok():
-            rclpy.shutdown()
+            rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

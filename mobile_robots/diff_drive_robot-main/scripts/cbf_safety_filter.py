@@ -112,7 +112,7 @@ def main():
         rclpy.spin(n)
     except KeyboardInterrupt:
         pass
-    rclpy.shutdown()
+    rclpy.try_shutdown()
 
 
 if __name__ == '__main__':
