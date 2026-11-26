@@ -6,6 +6,10 @@ from launch.substitutions import LaunchConfiguration
 from ament_index_python.packages import get_package_share_directory
 from nav2_common.launch import RewrittenYaml
 
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from controller_variants import CHOICES, apply_controller
+
 ROS_DISTRO = os.environ.get('ROS_DISTRO', 'humble')
 _NAV2_PARAMS = 'nav2_params_jazzy.yaml' if ROS_DISTRO == 'jazzy' else 'nav2_params.yaml'
 
@@ -36,7 +40,9 @@ def _build_nav2_action(context, pkg_share: str, home: str):
     map_arg = LaunchConfiguration('map').perform(context).strip()
     use_sim_time = LaunchConfiguration('use_sim_time').perform(context)
     map_file = _resolve_map_file(map_arg, world_path, home, pkg_share)
-    raw_params = os.path.join(pkg_share, 'config', _NAV2_PARAMS)
+    raw_params = apply_controller(
+        os.path.join(pkg_share, 'config', _NAV2_PARAMS),
+        LaunchConfiguration('controller').perform(context))
     bt_xml = os.path.join(pkg_share, 'config', 'bt', 'navigate_w_recovery.xml')
 
     params_file = RewrittenYaml(
@@ -76,6 +82,12 @@ def generate_launch_description():
         default_value='obstacles.world',
         description='World name used only for auto map selection when map is empty')
 
+    declare_controller = DeclareLaunchArgument(
+        name='controller',
+        default_value='mppi',
+        choices=CHOICES,
+        description='Local controller preset (mppi keeps the params file as is)')
+
     declare_sim_time = DeclareLaunchArgument(
         name='use_sim_time',
         default_value='true',
@@ -86,6 +98,7 @@ def generate_launch_description():
     return LaunchDescription([
         declare_map,
         declare_world,
+        declare_controller,
         declare_sim_time,
         nav2_bringup,
     ])
