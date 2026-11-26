@@ -34,6 +34,12 @@ install(
     scripts/priority_collision_avoidance.py
     scripts/deadlock_recovery.py
     scripts/handoff_coordinator.py
+    scripts/cbf_safety_filter.py
+    scripts/tf_freeze_watchdog.py
+    scripts/nav2_bringup_watchdog.py
+    scripts/scan_quality_gate.py
+    scripts/costmap_ghost_clear.py
+    scripts/slam_stall_watchdog.py
   DESTINATION lib/${PROJECT_NAME}
 )
 install(
