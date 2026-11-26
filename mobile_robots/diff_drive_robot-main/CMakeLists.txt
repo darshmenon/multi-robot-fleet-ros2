@@ -7,9 +7,17 @@ endif()
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
 # uncomment the following section in order to fill in
 # further dependencies manually.
 # find_package(<dependency> REQUIRED)
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "action/DockToStation.action"
+  "action/UndockFromStation.action"
+  "srv/GetRobotStatus.srv"
+)
+ament_export_dependencies(rosidl_default_runtime)
+
 install(
   PROGRAMS
     scripts/navigation.py
@@ -43,6 +51,8 @@ install(
     scripts/cbs_planner.py
     scripts/leader_follower.py
     scripts/multi_coverage.py
+    scripts/aruco_dock.py
+    scripts/station_server.py
   DESTINATION lib/${PROJECT_NAME}
 )
 install(
