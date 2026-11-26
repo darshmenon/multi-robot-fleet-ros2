@@ -5,15 +5,17 @@ fleet_manager.py — Product-like fleet management CLI.
 Commands
 ────────
   list           List all active robots and their states
-  status         Show map, SLAM, and Nav2 status
+  status         Show map, SLAM, and Nav2 status (/map, /map_merged, /map_fused)
   add <ns> <x> <y>   Dynamically spawn a robot into a running simulation
   remove <ns>    Kill a robot's Nav2 stack (Gazebo entity stays)
   teleop <ns>    Interactive keyboard control for one robot
   goto <ns> <location>       Send a navigation goal by location name
   goto <ns> <x> <y> [yaw]   Send a navigation goal by coordinates
+  dock <ns> [location]      Navigate to staging + visual ArUco dock
+  undock <ns> [dist] [speed] Back away, then spin to docks.yaml exit yaw
   explore <ns>   Start frontier exploration on a robot
   stop <ns>      Stop navigation / teleop for a robot
-  savemap [path] Save the current SLAM map
+  savemap [path] Save map (auto-picks /map_merged, /map_fused, or /map)
   locations      List all named locations from locations.yaml
   mission <ns> patrol <loc_or_wp> …   Loop through waypoints/locations
   mission <ns> sequence <loc_or_wp> … Visit once in order
@@ -34,6 +36,8 @@ Usage
   ros2 run diff_drive_robot fleet_manager.py locations
   ros2 run diff_drive_robot fleet_manager.py goto robot1 room_a
   ros2 run diff_drive_robot fleet_manager.py goto robot2 3.0 -1.0
+  ros2 run diff_drive_robot fleet_manager.py dock robot1
+  ros2 run diff_drive_robot fleet_manager.py undock robot1
   ros2 run diff_drive_robot fleet_manager.py mission robot1 patrol room_a room_b room_c
   ros2 run diff_drive_robot fleet_manager.py mission robot1 patrol 1,2,0 3,4,90
   ros2 run diff_drive_robot fleet_manager.py mission robot1 goto charging_dock
@@ -50,15 +54,23 @@ import termios
 import threading
 import time
 import tty
+from typing import Optional
 
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Twist, PoseStamped
+from action_msgs.msg import GoalStatus
+from geometry_msgs.msg import Twist, PoseStamped, PoseWithCovarianceStamped
 from nav_msgs.msg import OccupancyGrid
 from rclpy.action import ActionClient
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy
-from nav2_msgs.action import NavigateToPose
+from nav2_msgs.action import NavigateToPose, BackUp, Spin
 from std_msgs.msg import String
+
+try:
+    from diff_drive_robot.action import DockToStation, UndockFromStation
+    HAS_STATION_ACTIONS = True
+except ImportError:
+    HAS_STATION_ACTIONS = False
 
 try:
     import yaml
@@ -72,6 +84,12 @@ ANGULAR_SPEED = 1.0
 STOP_TIMEOUT  = 0.3
 PKG = 'diff_drive_robot'
 
+DOCK_LOCATION    = 'charging_dock'
+UNDOCK_DIST      = 0.5   # m — matches recovery_nav.xml's BackUp convention
+UNDOCK_SPEED     = 0.05  # m/s
+UNDOCK_TIMEOUT   = 15.0  # s
+UNDOCK_SPIN_TIMEOUT = 20.0  # s
+
 
 # ── Location helpers ──────────────────────────────────────────────────────────
 
@@ -82,11 +100,9 @@ def _load_locations() -> dict:
         from ament_index_python.packages import get_package_share_directory
         share = get_package_share_directory(PKG)
     except Exception:
-        share = os.path.join(
-            os.path.expanduser('~'), 'rosnav', 'src', 'diff_drive_robot-main')
+        share = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     candidates = [
         os.path.join(share, 'config', 'locations.yaml'),
-        os.path.join(os.path.expanduser('~'), 'rosnav', 'locations.yaml'),
     ]
     for p in candidates:
         if os.path.isfile(p):
@@ -96,6 +112,26 @@ def _load_locations() -> dict:
     return {}
 
 
+def _load_dock_cfg(dock_name: str = DOCK_LOCATION) -> dict:
+    """Load per-dock settings from config/docks.yaml."""
+    if not HAS_YAML:
+        return {}
+    try:
+        from ament_index_python.packages import get_package_share_directory
+        share = get_package_share_directory(PKG)
+    except Exception:
+        share = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(share, 'config', 'docks.yaml')
+    if not os.path.isfile(path):
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config', 'docks.yaml')
+    if not os.path.isfile(path):
+        return {}
+    with open(path) as f:
+        data = yaml.safe_load(f) or {}
+    docks = data.get('docks', {}) or {}
+    return dict(docks.get(dock_name, {}))
+
+
 def _resolve_location(arg: str, locations: dict) -> tuple[float, float, float]:
     """Return (x, y, yaw_rad) from a location name."""
     if arg not in locations:
@@ -103,6 +139,16 @@ def _resolve_location(arg: str, locations: dict) -> tuple[float, float, float]:
         raise KeyError(f'Unknown location: {arg!r}. Known: {known}')
     coords = locations[arg]
     return float(coords[0]), float(coords[1]), math.radians(float(coords[2]) if len(coords) > 2 else 0.0)
+
+
+def _yaw_from_quat(q) -> float:
+    return math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+
+
+def _angle_diff(a: float, b: float) -> float:
+    """Shortest signed angle from b to a."""
+    d = (a - b + math.pi) % (2.0 * math.pi) - math.pi
+    return d
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -128,29 +174,44 @@ def _discover_robots(node: Node) -> list[str]:
     })
 
 
+def _await(future, timeout: float):
+    """Block on a future without re-spinning the node — a background thread
+    already spins it, and a second concurrent spin can abort the process."""
+    deadline = time.time() + timeout
+    while not future.done() and time.time() < deadline:
+        time.sleep(0.05)
+    return future.result()
+
+
 def _yaw_to_quat(yaw: float) -> tuple[float, float, float, float]:
     return (0.0, 0.0, math.sin(yaw / 2), math.cos(yaw / 2))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 class FleetNode(Node):
+    # Map topics used by single-SLAM (/map), multi-SLAM (/map_merged), and
+    # scan-fusion (/map_fused). Status reports whichever is live.
+    _MAP_CANDIDATES = ('/map', '/map_merged', '/map_fused')
+
     def __init__(self):
         super().__init__('fleet_manager')
         self._pubs: dict[str, any] = {}
-        self._map_received = False
+        self._map_topics_received: set[str] = set()
 
         qos = QoSProfile(depth=1,
                          durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
-        self._map_sub = self.create_subscription(
-            OccupancyGrid, '/map', self._map_cb, qos)
+        for topic in self._MAP_CANDIDATES:
+            self.create_subscription(
+                OccupancyGrid, topic,
+                lambda _msg, t=topic: self._map_cb(t), qos)
 
-    def _map_cb(self, _):
-        self._map_received = True
+    def _map_cb(self, topic: str):
+        self._map_topics_received.add(topic)
 
     def _pub(self, ns: str):
         if ns not in self._pubs:
             self._pubs[ns] = self.create_publisher(
-                Twist, f'/{ns}/cmd_vel', 10)
+                Twist, f'/{ns}/cmd_vel' if ns else '/cmd_vel', 10)
         return self._pubs[ns]
 
     def _send_vel(self, ns: str, lin: float, ang: float):
@@ -158,6 +219,68 @@ class FleetNode(Node):
         msg.linear.x  = lin
         msg.angular.z = ang
         self._pub(ns).publish(msg)
+
+    def _station_name(self, ns: str, name: str) -> str:
+        return f'/{ns}/{name}' if ns else f'/{name}'
+
+    def _try_station_dock(self, ns: str, location: str) -> bool:
+        """Use station_server if it is up; False means caller should dock inline."""
+        if not HAS_STATION_ACTIONS:
+            return False
+        client = ActionClient(
+            self, DockToStation, self._station_name(ns, 'dock_to_station'))
+        try:
+            if not client.wait_for_server(timeout_sec=1.0):
+                return False
+            print(f'Docking {ns or "robot"} via station_server → {location} … ',
+                  end='', flush=True)
+            goal = DockToStation.Goal()
+            goal.station = location
+            future = client.send_goal_async(goal)
+            handle = _await(future, timeout=10.0)
+            if handle is None or not handle.accepted:
+                print('goal rejected.')
+                return True
+            result = _await(handle.get_result_async(), timeout=180.0)
+            if result is None or result.status != GoalStatus.STATUS_SUCCEEDED:
+                msg = ''
+                if result is not None and result.result is not None:
+                    msg = result.result.message
+                print(f'failed{": " + msg if msg else "."}')
+                return True
+            print(result.result.message or 'docked.')
+            return True
+        finally:
+            client.destroy()
+
+    def _try_station_undock(self, ns: str, dist: float, speed: float) -> bool:
+        if not HAS_STATION_ACTIONS:
+            return False
+        client = ActionClient(
+            self, UndockFromStation, self._station_name(ns, 'undock_from_station'))
+        try:
+            if not client.wait_for_server(timeout_sec=1.0):
+                return False
+            print(f'Undocking {ns or "robot"} via station_server … ', end='', flush=True)
+            goal = UndockFromStation.Goal()
+            goal.dist = float(dist)
+            goal.speed = float(speed)
+            future = client.send_goal_async(goal)
+            handle = _await(future, timeout=10.0)
+            if handle is None or not handle.accepted:
+                print('goal rejected.')
+                return True
+            result = _await(handle.get_result_async(), timeout=40.0)
+            if result is None or result.status != GoalStatus.STATUS_SUCCEEDED:
+                msg = ''
+                if result is not None and result.result is not None:
+                    msg = result.result.message
+                print(f'failed{": " + msg if msg else "."}')
+                return True
+            print(result.result.message or 'undocked.')
+            return True
+        finally:
+            client.destroy()
 
     # ── Commands ──────────────────────────────────────────────────────────────
     def cmd_list(self):
@@ -178,11 +301,13 @@ class FleetNode(Node):
         nodes = [n for n in self.get_node_names() if n]
         slam  = any('slam_toolbox' in n.lower() for n in nodes)
         nav   = any('bt_navigator' in n.lower() for n in nodes)
+        live_maps = [t for t in self._MAP_CANDIDATES if t in self._map_topics_received]
+        map_status = ', '.join(live_maps) if live_maps else 'none'
         print('\n── System Status ─────────────────────────────────────')
         print(f'  Active robots : {robots or "none"}')
         print(f'  SLAM running  : {"✓" if slam else "✗"}')
         print(f'  Nav2 running  : {"✓" if nav else "✗"}')
-        print(f'  /map available: {"✓" if self._map_received else "✗"}')
+        print(f'  Map available : {map_status}')
         print('──────────────────────────────────────────────────────\n')
 
     def cmd_add(self, ns: str, x: float, y: float):
@@ -213,10 +338,12 @@ class FleetNode(Node):
         else:
             print(f'  Gazebo spawn output: {r.stdout.strip() or r.stderr.strip()}')
 
-        # Bridge
+        # Bridge. Lidar lands on scan_raw; the laser_filter process below cleans
+        # it and republishes on scan — matching multi_robot.launch.py's wiring.
         subprocess.Popen([
             'ros2', 'run', 'ros_gz_bridge', 'parameter_bridge',
-            '--ros-args', '-r', f'__ns:=/{ns}', '--',
+            '--ros-args', '-r', f'__ns:=/{ns}',
+            '-r', f'/{ns}/scan:=/{ns}/scan_raw', '--',
             '/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock',
             f'/{ns}/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist',
             f'/{ns}/odom@nav_msgs/msg/Odometry[gz.msgs.Odometry',
@@ -224,13 +351,25 @@ class FleetNode(Node):
             f'/{ns}/tf@tf2_msgs/msg/TFMessage[gz.msgs.Pose_V',
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+        try:
+            from ament_index_python.packages import get_package_share_directory
+            share = get_package_share_directory(PKG)
+        except Exception:
+            share = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        subprocess.Popen([
+            'ros2', 'run', 'laser_filters', 'scan_to_scan_filter_chain',
+            '--ros-args', '-r', f'__ns:=/{ns}',
+            '-r', 'scan:=scan_raw', '-r', 'scan_filtered:=scan',
+            '--params-file', os.path.join(share, 'config', 'laser_filters.yaml'),
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
         print(f'  {ns} bridge started.')
         print(f'  To start Nav2 for {ns}, add it to the ROBOTS list and relaunch.')
         print(f'  Or use: ros2 launch {PKG} multi_robot.launch.py explore:=false')
 
     def cmd_goto(self, ns: str, x: float, y: float, yaw: float = 0.0):
-        client = ActionClient(self, NavigateToPose, f'/{ns}/navigate_to_pose')
-        print(f'Waiting for {ns} navigate_to_pose action server … ', end='', flush=True)
+        client = ActionClient(self, NavigateToPose, f'/{ns}/navigate_to_pose' if ns else '/navigate_to_pose')
+        print(f'Waiting for {ns or "robot"} navigate_to_pose action server … ', end='', flush=True)
         if not client.wait_for_server(timeout_sec=5.0):
             print('timeout! Is Nav2 running for this robot?')
             return
@@ -256,6 +395,168 @@ class FleetNode(Node):
             return
         print(f'Goal sent to {ns} → ({x:.2f}, {y:.2f}, yaw={math.degrees(yaw):.1f}°)')
 
+    def cmd_dock(self, ns: str, location: str = DOCK_LOCATION):
+        """Navigate to the named dock pose and wait for arrival."""
+        if self._try_station_dock(ns, location):
+            return
+        locations = _load_locations()
+        try:
+            x, y, yaw = _resolve_location(location, locations)
+        except KeyError as e:
+            print(e)
+            return
+
+        client = ActionClient(self, NavigateToPose, f'/{ns}/navigate_to_pose' if ns else '/navigate_to_pose')
+        print(f'Docking {ns or "robot"} → {location} ({x:.2f}, {y:.2f}) … ', end='', flush=True)
+        try:
+            if not client.wait_for_server(timeout_sec=5.0):
+                print('timeout! Is Nav2 running for this robot?')
+                return
+
+            goal = NavigateToPose.Goal()
+            goal.pose = PoseStamped()
+            goal.pose.header.frame_id = 'map'
+            goal.pose.header.stamp = self.get_clock().now().to_msg()
+            goal.pose.pose.position.x = x
+            goal.pose.pose.position.y = y
+            ox, oy, oz, ow = _yaw_to_quat(yaw)
+            goal.pose.pose.orientation.x = ox
+            goal.pose.pose.orientation.y = oy
+            goal.pose.pose.orientation.z = oz
+            goal.pose.pose.orientation.w = ow
+
+            future = client.send_goal_async(goal)
+            handle = _await(future, timeout=10.0)
+            if handle is None or not handle.accepted:
+                print('goal rejected.')
+                return
+
+            result_future = handle.get_result_async()
+            result = _await(result_future, timeout=120.0)
+            if result is None or result.status != GoalStatus.STATUS_SUCCEEDED:
+                print('docking failed — goal not reached.')
+                return
+            print(f'reached {location} staging pose.')
+        finally:
+            client.destroy()
+
+        # Clear any residual Nav2 cmd_vel before visual servo takes over.
+        self._send_vel(ns, 0.0, 0.0)
+        time.sleep(0.2)
+
+        dock_cfg = _load_dock_cfg(location)
+        if location == DOCK_LOCATION or dock_cfg:
+            self._visual_dock(ns, location)
+        else:
+            print(f'docked at {location}.')
+
+    def _visual_dock(self, ns: str, dock_name: str = DOCK_LOCATION):
+        """Hand off to aruco_dock.py for camera-guided final approach to the marker."""
+        print(f'Visually servoing {ns or "robot"} onto the dock marker …')
+        cmd = ['ros2', 'run', PKG, 'aruco_dock.py', '--ros-args']
+        if ns:
+            cmd += ['-p', f'namespace:={ns}']
+        cmd += [
+            '-p', f'dock_name:={dock_name}',
+            '-p', 'docks_file:=docks.yaml',
+            '-p', 'prefer_restage:=true',
+            '-p', 'max_retries:=3',
+        ]
+        r = subprocess.run(cmd)
+        if r.returncode == 0:
+            print(f'{ns or "robot"} docked.')
+        else:
+            print(f'{ns or "robot"} visual docking failed (exit {r.returncode}).')
+
+    def _read_amcl_yaw(self, ns: str, timeout: float = 2.0) -> Optional[float]:
+        """Best-effort current map yaw from amcl_pose."""
+        topic = f'/{ns}/amcl_pose' if ns else '/amcl_pose'
+        box = {'yaw': None}
+
+        def _cb(msg: PoseWithCovarianceStamped):
+            box['yaw'] = _yaw_from_quat(msg.pose.pose.orientation)
+
+        sub = self.create_subscription(PoseWithCovarianceStamped, topic, _cb, 10)
+        deadline = time.time() + timeout
+        try:
+            while box['yaw'] is None and time.time() < deadline:
+                time.sleep(0.05)
+            return box['yaw']
+        finally:
+            self.destroy_subscription(sub)
+
+    def cmd_undock(self, ns: str, dist: float = UNDOCK_DIST, speed: float = UNDOCK_SPEED):
+        """Back away from the dock, then spin to the configured exit yaw."""
+        if self._try_station_undock(ns, dist, speed):
+            return
+        dock_cfg = _load_dock_cfg(DOCK_LOCATION)
+        client = ActionClient(self, BackUp, f'/{ns}/backup' if ns else '/backup')
+        print(f'Undocking {ns or "robot"} — backing up {dist:.2f} m … ', end='', flush=True)
+        try:
+            if not client.wait_for_server(timeout_sec=5.0):
+                print('timeout! Is the Nav2 behavior_server running for this robot?')
+                return
+
+            goal = BackUp.Goal()
+            goal.target.x = dist
+            goal.speed = speed
+            goal.time_allowance.sec = int(UNDOCK_TIMEOUT)
+
+            future = client.send_goal_async(goal)
+            handle = _await(future, timeout=10.0)
+            if handle is None or not handle.accepted:
+                print('goal rejected.')
+                return
+
+            result_future = handle.get_result_async()
+            result = _await(result_future, timeout=UNDOCK_TIMEOUT + 5.0)
+            if result is not None and result.status == GoalStatus.STATUS_SUCCEEDED:
+                print('backed up.', end=' ', flush=True)
+            else:
+                print('undock backup failed.')
+                return
+        finally:
+            client.destroy()
+
+        # Rotate to exit heading so the next Nav2 goal starts clean.
+        undock_yaw_deg = dock_cfg.get('undock_yaw_deg')
+        if undock_yaw_deg is None:
+            print('undocked.')
+            return
+
+        target_yaw = math.radians(float(undock_yaw_deg))
+        current_yaw = self._read_amcl_yaw(ns)
+        if current_yaw is None:
+            print('undocked (no amcl_pose for exit spin).')
+            return
+
+        delta = _angle_diff(target_yaw, current_yaw)
+        if abs(delta) < math.radians(5.0):
+            print('undocked (already facing exit).')
+            return
+
+        spin_client = ActionClient(self, Spin, f'/{ns}/spin' if ns else '/spin')
+        print(f'spinning {math.degrees(delta):+.1f}° to exit yaw … ', end='', flush=True)
+        try:
+            if not spin_client.wait_for_server(timeout_sec=5.0):
+                print('spin server unavailable — undocked without rotate.')
+                return
+            spin_goal = Spin.Goal()
+            spin_goal.target_yaw = float(delta)
+            spin_goal.time_allowance.sec = int(UNDOCK_SPIN_TIMEOUT)
+            future = spin_client.send_goal_async(spin_goal)
+            handle = _await(future, timeout=10.0)
+            if handle is None or not handle.accepted:
+                print('spin rejected — undocked without rotate.')
+                return
+            result = _await(handle.get_result_async(), timeout=UNDOCK_SPIN_TIMEOUT + 5.0)
+            if result is not None and result.status == GoalStatus.STATUS_SUCCEEDED:
+                print('undocked.')
+            else:
+                print('spin incomplete — undocked anyway.')
+        finally:
+            spin_client.destroy()
+
     def cmd_stop(self, ns: str):
         self._send_vel(ns, 0.0, 0.0)
         # Goal-handle based cancel is not possible without tracking the handle;
@@ -275,9 +576,23 @@ class FleetNode(Node):
     def cmd_savemap(self, path: str):
         import os as _os
         _os.makedirs(_os.path.dirname(path) if '/' in path else '.', exist_ok=True)
-        print(f'Saving map to {path} …')
+        # Prefer merged/fused maps when present (multi-SLAM / scan fusion).
+        topic = '/map'
+        for candidate in ('/map_merged', '/map_fused', '/map'):
+            if candidate in self._map_topics_received:
+                topic = candidate
+                break
+        else:
+            # Fall back to whatever is advertised right now.
+            advertised = {t for t, _ in self.get_topic_names_and_types()}
+            for candidate in ('/map_merged', '/map_fused', '/map'):
+                if candidate in advertised:
+                    topic = candidate
+                    break
+        print(f'Saving map from {topic} → {path} …')
         r = subprocess.run(
-            ['ros2', 'run', 'nav2_map_server', 'map_saver_cli', '-f', path],
+            ['ros2', 'run', 'nav2_map_server', 'map_saver_cli',
+             '-t', topic, '-f', path],
             capture_output=True, text=True)
         if r.returncode == 0:
             print(f'Map saved: {path}.yaml / {path}.pgm')
@@ -395,7 +710,7 @@ class FleetNode(Node):
                 if not tasks:
                     print('  (empty)')
                 print('\n── Robots ────────────────────────────────────────')
-                for ns, st in (bots.items() if bots else {}).items():
+                for ns, st in (bots or {}).items():
                     print(f'  {ns}: {st}')
                 print('──────────────────────────────────────────────────\n')
             else:
@@ -596,6 +911,21 @@ def main():
                 print(e)
                 sys.exit(1)
             node.cmd_goto(ns, x, y, yaw)
+
+    elif cmd == 'dock':
+        if len(args) < 2:
+            print('Usage: fleet_manager.py dock <namespace> [location]')
+            sys.exit(1)
+        location = args[2] if len(args) > 2 else DOCK_LOCATION
+        node.cmd_dock(args[1], location)
+
+    elif cmd == 'undock':
+        if len(args) < 2:
+            print('Usage: fleet_manager.py undock <namespace> [dist] [speed]')
+            sys.exit(1)
+        dist  = float(args[2]) if len(args) > 2 else UNDOCK_DIST
+        speed = float(args[3]) if len(args) > 3 else UNDOCK_SPEED
+        node.cmd_undock(args[1], dist, speed)
 
     elif cmd == 'stop':
         if len(args) < 2:
